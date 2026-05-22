@@ -1,0 +1,58 @@
+name: Price Snapshot
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # daily at 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+
+      - name: Checkout gh-pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+        continue-on-error: true
+
+      - name: Ensure gh-pages dir
+        run: |
+          mkdir -p gh-pages/prices/archive
+          if [ ! -f gh-pages/.nojekyll ]; then touch gh-pages/.nojekyll; fi
+
+      - name: Seed gh-pages config/index if missing
+        run: |
+          if [ ! -f gh-pages/_config.yml ]; then cp gh-pages-seed/_config.yml gh-pages/_config.yml; fi
+          if [ ! -f gh-pages/index.md ]; then cp gh-pages-seed/index.md gh-pages/index.md; fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run snapshot scraper
+        run: node scripts/snapshot-prices.mjs
+
+      - name: Commit snapshot
+        working-directory: gh-pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ ! -d .git ]; then
+            git init -b gh-pages
+            git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          fi
+          git add -A
+          if git diff --cached --quiet; then
+            echo "no changes"
+          else
+            git commit -m "snapshot $(date -u +%Y-%m-%d)"
+            git push -u origin gh-pages
+          fi
