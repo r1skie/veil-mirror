@@ -4,7 +4,7 @@ import { resolve } from 'node:path'
 const OUT_DIR = resolve('gh-pages/prices')
 const PAGE = 100
 const SLEEP_MS = 700
-const UA = 'Mozilla/5.0 (compatible; SteamIdlerPlus/0.1; +https://github.com/r1skie/SteamIdler-)'
+const UA = 'Mozilla/5.0 (compatible; VeilMirror/1.0; +https://github.com/r1skie/veil-mirror)'
 
 // Trading-card-class filter narrows from ~200k 753 items to ~30-50k cards.
 const url = (start) =>
