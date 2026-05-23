@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
 const OUT_DIR = resolve('gh-pages/prices')
@@ -43,13 +43,25 @@ function extractAppId(row) {
   return null
 }
 
-const out = { generatedAt: new Date().toISOString(), cards: {} }
+// Merge over prior snapshot: cards not refetched this run keep their previous
+// price + their previous `at` timestamp so consumers can see staleness.
+let priorCards = {}
+try {
+  const prior = JSON.parse(await readFile(resolve(OUT_DIR, 'latest.json'), 'utf-8'))
+  priorCards = prior?.cards && typeof prior.cards === 'object' ? prior.cards : {}
+  console.debug(`Merging over prior snapshot: ${Object.keys(priorCards).length} entries`)
+} catch {
+  console.debug('No prior snapshot — starting fresh')
+}
+
+const now = new Date().toISOString()
+const out = { generatedAt: now, cards: { ...priorCards } }
 let start = 0
 let total = Infinity
 let pages = 0
-let captured = 0
+let refreshed = 0
 
-while (start < total && captured < MAX_LISTINGS) {
+while (start < total && refreshed < MAX_LISTINGS) {
   const data = await fetchPage(start)
   if (!data?.success) {
     console.error('SCE search returned success=false at start=', start)
@@ -59,25 +71,27 @@ while (start < total && captured < MAX_LISTINGS) {
   const results = Array.isArray(data.results) ? data.results : []
   if (results.length === 0) break
   for (const row of results) {
-    if (captured >= MAX_LISTINGS) break
+    if (refreshed >= MAX_LISTINGS) break
     if (typeof row?.hash_name !== 'string') continue
     if (typeof row?.sell_price !== 'number' || row.sell_price <= 0) continue
     const appId = extractAppId(row)
     if (appId == null) continue
-    out.cards[row.hash_name] = { price: row.sell_price, appId }
-    captured++
+    out.cards[row.hash_name] = { price: row.sell_price, appId, at: now }
+    refreshed++
   }
   pages++
   start += PAGE
-  if (pages % 5 === 0) console.debug(`page ${pages}, start=${start}/${total}, captured=${captured}/${MAX_LISTINGS}`)
-  if (captured >= MAX_LISTINGS) break
+  if (pages % 5 === 0) console.debug(`page ${pages}, start=${start}/${total}, refreshed=${refreshed}/${MAX_LISTINGS}`)
+  if (refreshed >= MAX_LISTINGS) break
   await new Promise(r => setTimeout(r, SLEEP_MS))
 }
 
-out.totalCards = captured
+const totalCards = Object.keys(out.cards).length
+out.refreshedThisRun = refreshed
+out.totalCards = totalCards
 out.totalCount = total
 out.cap = MAX_LISTINGS
-console.debug(`Done — ${captured} cards from ${pages} pages (total_count=${total}, cap=${MAX_LISTINGS})`)
+console.debug(`Done — ${refreshed} refreshed, ${totalCards} total in merged snapshot (cap=${MAX_LISTINGS})`)
 
 await mkdir(OUT_DIR, { recursive: true })
 await writeFile(resolve(OUT_DIR, 'latest.json'), JSON.stringify(out))
