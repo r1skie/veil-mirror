@@ -2,25 +2,26 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
 const OUT_DIR = resolve('gh-pages/prices')
-const PAGE = 100
-const SLEEP_MS = Number(process.env.SLEEP_MS ?? 1200)
+// Steam's /market/search/render hard-caps the page at 10 items regardless of
+// the requested `count`. The previous script asked for 100, got 10, and then
+// advanced `start` by 100 — silently skipping 90% of every range. We now use
+// the real page size and advance by the actual returned count (no skipping).
+const PAGE = 10
+const SLEEP_MS = Number(process.env.SLEEP_MS ?? 500)
 const APPID = 753 // Steam Community items (cards, backgrounds, emoticons, boosters)
 const UA = 'Mozilla/5.0 (compatible; VeilMirror/1.0; +https://github.com/r1skie/veil-mirror)'
 
-// Item classes under app 753, each swept separately by quantity desc so the
-// most-traded items of EVERY class are captured (not just cards). Trading cards
-// (class 2) include foils. A user's inventory is a mix of all of these, so
-// covering them maximises the share Veil can price from the mirror alone.
-// `cap` scales with how many items + how much liquidity each class has.
+// Item classes under app 753, each swept by quantity desc so the most-traded
+// (most likely owned) items of EVERY class are captured. Cards (class 2,
+// ~182k total) include foils. Caps bound runtime within the workflow timeout;
+// the merge-over-prior behaviour accumulates deeper coverage across daily runs.
 const CLASSES = [
-  { tag: 'tag_item_class_2', label: 'cards', cap: Number(process.env.CAP_CARDS ?? 16000) },
-  { tag: 'tag_item_class_3', label: 'backgrounds', cap: Number(process.env.CAP_BACKGROUNDS ?? 9000) },
-  { tag: 'tag_item_class_4', label: 'emoticons', cap: Number(process.env.CAP_EMOTICONS ?? 7000) },
-  { tag: 'tag_item_class_5', label: 'boosters', cap: Number(process.env.CAP_BOOSTERS ?? 3000) },
+  { tag: 'tag_item_class_2', label: 'cards', cap: Number(process.env.CAP_CARDS ?? 120000) },
+  { tag: 'tag_item_class_3', label: 'backgrounds', cap: Number(process.env.CAP_BACKGROUNDS ?? 60000) },
+  { tag: 'tag_item_class_4', label: 'emoticons', cap: Number(process.env.CAP_EMOTICONS ?? 40000) },
+  { tag: 'tag_item_class_5', label: 'boosters', cap: Number(process.env.CAP_BOOSTERS ?? 20000) },
 ]
 
-// Sort by listings desc → Steam's "most-traded" first, so each class's cap
-// captures the highest-liquidity (most likely owned/traded) items.
 const url = (start, classTag) =>
   `https://steamcommunity.com/market/search/render/?count=${PAGE}&start=${start}` +
   `&appid=${APPID}&category_753_item_class%5B%5D=${classTag}` +
@@ -68,12 +69,25 @@ const out = { generatedAt: now, cards: { ...priorCards } }
 let refreshed = 0
 let grandTotal = 0
 
+// Flush the snapshot to disk periodically so a long run that hits the workflow
+// timeout still leaves a usable, larger snapshot (writeFile only-at-end would
+// lose everything on a kill).
+async function flush() {
+  out.refreshedThisRun = refreshed
+  out.totalCards = Object.keys(out.cards).length
+  out.totalCount = grandTotal
+  out.classes = CLASSES.map((c) => ({ tag: c.tag, label: c.label, cap: c.cap }))
+  await mkdir(OUT_DIR, { recursive: true })
+  await writeFile(resolve(OUT_DIR, 'latest.json'), JSON.stringify(out))
+}
+
 // Sweep each class up to its own cap, accumulating into the shared `cards` map.
 for (const { tag, label, cap } of CLASSES) {
   let start = 0
   let total = Infinity
   let pages = 0
   let classRefreshed = 0
+  let sinceFlush = 0
   console.debug(`--- class ${label} (${tag}), cap=${cap} ---`)
 
   while (start < total && classRefreshed < cap) {
@@ -100,26 +114,24 @@ for (const { tag, label, cap } of CLASSES) {
       out.cards[row.hash_name] = { price: row.sell_price, appId, at: now }
       classRefreshed++
       refreshed++
+      sinceFlush++
     }
     pages++
-    start += PAGE
-    if (pages % 5 === 0) console.debug(`  ${label} page ${pages}, start=${start}/${total}, refreshed=${classRefreshed}/${cap}`)
+    // Advance by what Steam actually returned — never skip rows.
+    start += results.length
+    if (pages % 50 === 0) console.debug(`  ${label}: start=${start}/${total}, refreshed=${classRefreshed}/${cap}`)
+    if (sinceFlush >= 2000) { await flush(); sinceFlush = 0 }
     if (classRefreshed >= cap) break
     await new Promise(r => setTimeout(r, SLEEP_MS))
   }
   grandTotal = Math.max(grandTotal, total === Infinity ? 0 : total)
   console.debug(`class ${label}: refreshed ${classRefreshed}`)
+  await flush()
 }
 
-const totalCards = Object.keys(out.cards).length
-out.refreshedThisRun = refreshed
-out.totalCards = totalCards
-out.totalCount = grandTotal
-out.classes = CLASSES.map((c) => ({ tag: c.tag, label: c.label, cap: c.cap }))
-console.debug(`Done — ${refreshed} refreshed this run, ${totalCards} total in merged snapshot`)
+await flush()
+console.debug(`Done — ${refreshed} refreshed this run, ${Object.keys(out.cards).length} total in merged snapshot`)
 
-await mkdir(OUT_DIR, { recursive: true })
-await writeFile(resolve(OUT_DIR, 'latest.json'), JSON.stringify(out))
 const date = new Date().toISOString().slice(0, 10)
 await mkdir(resolve(OUT_DIR, 'archive'), { recursive: true })
 await writeFile(resolve(OUT_DIR, `archive/${date}.json`), JSON.stringify(out))
